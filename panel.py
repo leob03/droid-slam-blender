@@ -58,6 +58,9 @@ class DROIDSLAM_PT_Panel(bpy.types.Panel):
         box.label(text="Import", icon='IMPORT')
         box.prop(props, "start_frame")
         box.prop(props, "import_pointcloud")
+        row = box.row()
+        row.enabled = props.import_pointcloud
+        row.prop(props, "colored_pointcloud")
         row = box.row(align=True)
         row.operator("droid_slam.import_trajectory", icon='ARMATURE_DATA',   text="Trajectory")
         row.operator("droid_slam.import_pointcloud", icon='POINTCLOUD_DATA', text="Point Cloud")

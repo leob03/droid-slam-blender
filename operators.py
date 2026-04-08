@@ -30,11 +30,17 @@ def _poll_process():
         props.status = "Done"
         if props.last_tum_path and os.path.exists(props.last_tum_path):
             from .trajectory import import_tum_trajectory
-            import_tum_trajectory(props.last_tum_path, props.start_frame)
+            if props.calib_mode == 'FILE':
+                import_tum_trajectory(props.last_tum_path, props.start_frame,
+                                      calib_path=bpy.path.abspath(props.calib_file))
+            else:
+                import_tum_trajectory(props.last_tum_path, props.start_frame,
+                                      fx=props.fx, fy=props.fy,
+                                      cx=props.cx, cy=props.cy)
 
         if props.import_pointcloud and props.last_ply_path and os.path.exists(props.last_ply_path):
             from .trajectory import import_pointcloud_ply
-            import_pointcloud_ply(props.last_ply_path)
+            import_pointcloud_ply(props.last_ply_path, colored=props.colored_pointcloud)
     else:
         props.status = f"Error (exit {retcode}) — see log"
 
@@ -213,7 +219,14 @@ class DROIDSLAM_OT_ImportTrajectory(bpy.types.Operator):
 
     def execute(self, context):
         from .trajectory import import_tum_trajectory
-        import_tum_trajectory(self.filepath, context.scene.droid_slam.start_frame)
+        props = context.scene.droid_slam
+        if props.calib_mode == 'FILE':
+            import_tum_trajectory(self.filepath, props.start_frame,
+                                  calib_path=bpy.path.abspath(props.calib_file))
+        else:
+            import_tum_trajectory(self.filepath, props.start_frame,
+                                  fx=props.fx, fy=props.fy,
+                                  cx=props.cx, cy=props.cy)
         return {'FINISHED'}
 
 
@@ -233,7 +246,7 @@ class DROIDSLAM_OT_ImportPointCloud(bpy.types.Operator):
 
     def execute(self, context):
         from .trajectory import import_pointcloud_ply
-        import_pointcloud_ply(self.filepath)
+        import_pointcloud_ply(self.filepath, colored=context.scene.droid_slam.colored_pointcloud)
         return {'FINISHED'}
 
 

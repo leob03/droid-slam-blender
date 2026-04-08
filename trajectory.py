@@ -103,20 +103,94 @@ def import_tum_trajectory(tum_path: str, start_frame: int = 1,
     print(f"✔ Imported {frame_offset + 1} poses from {tum_path}")
 
 
-def import_pointcloud_ply(ply_path: str) -> None:
+def import_pointcloud_ply(ply_path: str, colored: bool = False) -> None:
     import bpy
 
-    # Blender 4.x uses wm.ply_import; older versions use import_mesh.ply
-    try:
-        bpy.ops.wm.ply_import(filepath=ply_path)
-    except AttributeError:
-        bpy.ops.import_mesh.ply(filepath=ply_path)
-
-    # parent to the same global fix empty so it lives in the same space
-    empty_name = "DROID-SLAM_GlobalFix"
-    if empty_name in bpy.data.objects:
+    if colored:
+        obj = _import_ply_with_colors(ply_path)
+    else:
+        # standard import — no color processing
+        try:
+            bpy.ops.wm.ply_import(filepath=ply_path)
+        except AttributeError:
+            bpy.ops.import_mesh.ply(filepath=ply_path)
         obj = bpy.context.active_object
-        if obj:
-            obj.parent = bpy.data.objects[empty_name]
 
-    print(f"✔ Imported point cloud from {ply_path}")
+    empty_name = "DROID-SLAM_GlobalFix"
+    if empty_name in bpy.data.objects and obj:
+        obj.parent = bpy.data.objects[empty_name]
+
+    print(f"✔ Imported point cloud from {ply_path} (colored={colored})")
+
+
+def _import_ply_with_colors(ply_path: str):
+    """Parse the PLY manually so we control the color attribute setup."""
+    import bpy
+    import numpy as np
+
+    # --- parse binary PLY header ---
+    with open(ply_path, 'rb') as f:
+        header_bytes = b""
+        while True:
+            line = f.readline()
+            header_bytes += line
+            if line.strip() == b"end_header":
+                break
+
+        header = header_bytes.decode('utf-8')
+        n_verts = int(next(l for l in header.splitlines() if l.startswith("element vertex")).split()[-1])
+
+        # build numpy dtype from property list
+        # supports: double/float → float64/float32, uchar/uint8 → uint8
+        type_map = {
+            'double': np.float64, 'float': np.float32,
+            'uchar': np.uint8,    'uint8': np.uint8,
+            'int': np.int32,      'uint': np.uint32,
+        }
+        props = []
+        for l in header.splitlines():
+            if l.startswith("property"):
+                parts = l.split()
+                props.append((parts[2], type_map.get(parts[1], np.float32)))
+
+        dtype = np.dtype(props)
+        data  = np.frombuffer(f.read(n_verts * dtype.itemsize), dtype=dtype)
+
+    coords = np.stack([data['x'], data['y'], data['z']], axis=1).astype(np.float32)
+    # colors stored as uchar 0-255 → normalise to 0-1
+    colors = np.stack([data['red'],  data['green'], data['blue']], axis=1).astype(np.float32) / 255.0
+
+    # --- build Blender mesh ---
+    mesh = bpy.data.meshes.new("DROID-SLAM_PointCloud")
+    mesh.vertices.add(n_verts)
+    mesh.vertices.foreach_set("co", coords.flatten())
+    mesh.update()
+
+    # add FLOAT_COLOR attribute (RGBA expected by foreach_set)
+    attr_name = "point_color"
+    attr = mesh.attributes.new(name=attr_name, type='FLOAT_COLOR', domain='POINT')
+    rgba = np.concatenate([colors, np.ones((n_verts, 1), dtype=np.float32)], axis=1)
+    attr.data.foreach_set("color", rgba.flatten())
+
+    # --- create object ---
+    obj = bpy.data.objects.new("DROID-SLAM_PointCloud", mesh)
+    bpy.context.collection.objects.link(obj)
+    bpy.context.view_layer.objects.active = obj
+
+    # --- material: ShaderNodeAttribute → Principled BSDF ---
+    mat = bpy.data.materials.new(name="DROID-SLAM_PointCloud")
+    mat.use_nodes = True
+    nt = mat.node_tree
+
+    col_node = nt.nodes.new("ShaderNodeAttribute")
+    col_node.attribute_name = attr_name
+
+    bsdf = nt.nodes.get("Principled BSDF") or nt.nodes.new("ShaderNodeBsdfPrincipled")
+    out  = nt.nodes.get("Material Output") or nt.nodes.new("ShaderNodeOutputMaterial")
+
+    nt.links.new(bsdf.outputs["BSDF"],          out.inputs["Surface"])
+    nt.links.new(col_node.outputs["Color"],     bsdf.inputs["Base Color"])
+    nt.links.new(col_node.outputs["Color"],     bsdf.inputs["Emission Color"])
+
+    mesh.materials.append(mat)
+    return obj

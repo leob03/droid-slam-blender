@@ -70,6 +70,11 @@ class DroidSlamProperties(bpy.types.PropertyGroup):
         description="Also import the reconstructed point cloud as a mesh",
         default=True,
     )
+    colored_pointcloud: BoolProperty(
+        name="Colored Point Cloud",
+        description="Apply vertex colors from the PLY using an Emission shader (slower import)",
+        default=False,
+    )
 
     # --- runtime state ---
     status: StringProperty(default="Ready")
