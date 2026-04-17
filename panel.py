@@ -41,6 +41,9 @@ class DROIDSLAM_PT_Panel(bpy.types.Panel):
         row = box.row(align=True)
         row.prop(props, "stride")
         row.prop(props, "buffer")
+        row = box.row(align=True)
+        row.prop(props, "start_frame")
+        row.prop(props, "end_frame")
 
         # --- Run / Cancel ---
         box = layout.box()
@@ -56,11 +59,10 @@ class DROIDSLAM_PT_Panel(bpy.types.Panel):
         # --- Import ---
         box = layout.box()
         box.label(text="Import", icon='IMPORT')
-        box.prop(props, "start_frame")
         box.prop(props, "import_pointcloud")
         row = box.row()
         row.enabled = props.import_pointcloud
-        row.prop(props, "colored_pointcloud")
+        row.prop(props, "point_radius")
         row = box.row(align=True)
         row.operator("droid_slam.import_trajectory", icon='ARMATURE_DATA',   text="Trajectory")
         row.operator("droid_slam.import_pointcloud", icon='POINTCLOUD_DATA', text="Point Cloud")

@@ -103,32 +103,36 @@ def import_tum_trajectory(tum_path: str, start_frame: int = 1,
     print(f"✔ Imported {frame_offset + 1} poses from {tum_path}")
 
 
-def import_pointcloud_ply(ply_path: str, colored: bool = False) -> None:
+def import_pointcloud_ply(ply_path: str, point_radius: float = 0.005) -> None:
     import bpy
 
-    if colored:
-        obj = _import_ply_with_colors(ply_path)
-    else:
-        # standard import — no color processing
-        try:
-            bpy.ops.wm.ply_import(filepath=ply_path)
-        except AttributeError:
-            bpy.ops.import_mesh.ply(filepath=ply_path)
-        obj = bpy.context.active_object
+    obj = _import_ply_colored(ply_path, point_radius=point_radius)
 
     empty_name = "DROID-SLAM_GlobalFix"
     if empty_name in bpy.data.objects and obj:
         obj.parent = bpy.data.objects[empty_name]
 
-    print(f"✔ Imported point cloud from {ply_path} (colored={colored})")
+    print(f"✔ Imported point cloud from {ply_path}")
 
 
-def _import_ply_with_colors(ply_path: str):
-    """Parse the PLY manually so we control the color attribute setup."""
-    import bpy
+def _parse_ply(ply_path: str):
+    """Parse a binary PLY file, returning (coords, colors) as float32 arrays."""
     import numpy as np
 
-    # --- parse binary PLY header ---
+    try:
+        from plyfile import PlyData
+        plydata = PlyData.read(ply_path)
+        verts = plydata["vertex"].data
+        coords = np.stack([verts["x"], verts["y"], verts["z"]], axis=1).astype(np.float32)
+        if {"red", "green", "blue"}.issubset(verts.dtype.names):
+            colors = np.stack([verts["red"], verts["green"], verts["blue"]], axis=1).astype(np.float32) / 255.0
+        else:
+            colors = np.ones((len(coords), 3), dtype=np.float32)
+        return coords, colors
+    except ImportError:
+        pass
+
+    # Manual fallback parser
     with open(ply_path, 'rb') as f:
         header_bytes = b""
         while True:
@@ -140,8 +144,6 @@ def _import_ply_with_colors(ply_path: str):
         header = header_bytes.decode('utf-8')
         n_verts = int(next(l for l in header.splitlines() if l.startswith("element vertex")).split()[-1])
 
-        # build numpy dtype from property list
-        # supports: double/float → float64/float32, uchar/uint8 → uint8
         type_map = {
             'double': np.float64, 'float': np.float32,
             'uchar': np.uint8,    'uint8': np.uint8,
@@ -157,18 +159,29 @@ def _import_ply_with_colors(ply_path: str):
         data  = np.frombuffer(f.read(n_verts * dtype.itemsize), dtype=dtype)
 
     coords = np.stack([data['x'], data['y'], data['z']], axis=1).astype(np.float32)
-    # colors stored as uchar 0-255 → normalise to 0-1
-    colors = np.stack([data['red'],  data['green'], data['blue']], axis=1).astype(np.float32) / 255.0
+    if all(c in data.dtype.names for c in ('red', 'green', 'blue')):
+        colors = np.stack([data['red'], data['green'], data['blue']], axis=1).astype(np.float32) / 255.0
+    else:
+        colors = np.ones((len(coords), 3), dtype=np.float32)
 
-    # --- build Blender mesh ---
+    return coords, colors
+
+
+def _import_ply_colored(ply_path: str, point_radius: float = 0.005):
+    import bpy
+    import numpy as np
+
+    coords, colors = _parse_ply(ply_path)
+    n_verts = len(coords)
+
+    # --- build mesh ---
     mesh = bpy.data.meshes.new("DROID-SLAM_PointCloud")
     mesh.vertices.add(n_verts)
     mesh.vertices.foreach_set("co", coords.flatten())
     mesh.update()
 
-    # add FLOAT_COLOR attribute (RGBA expected by foreach_set)
-    attr_name = "point_color"
-    attr = mesh.attributes.new(name=attr_name, type='FLOAT_COLOR', domain='POINT')
+    # RGBA color attribute — same approach as DA3-blender
+    attr = mesh.attributes.new(name="point_color", type='FLOAT_COLOR', domain='POINT')
     rgba = np.concatenate([colors, np.ones((n_verts, 1), dtype=np.float32)], axis=1)
     attr.data.foreach_set("color", rgba.flatten())
 
@@ -177,20 +190,62 @@ def _import_ply_with_colors(ply_path: str):
     bpy.context.collection.objects.link(obj)
     bpy.context.view_layer.objects.active = obj
 
-    # --- material: ShaderNodeAttribute → Principled BSDF ---
-    mat = bpy.data.materials.new(name="DROID-SLAM_PointCloud")
+    # --- material: Emission shader so colors show without scene lighting ---
+    mat = bpy.data.materials.new(name="DROID-SLAM_PointCloud_Mat")
     mat.use_nodes = True
     nt = mat.node_tree
+    nt.nodes.clear()
 
-    col_node = nt.nodes.new("ShaderNodeAttribute")
-    col_node.attribute_name = attr_name
+    attr_node = nt.nodes.new("ShaderNodeAttribute")
+    attr_node.attribute_name = "point_color"
+    attr_node.location = (-300, 0)
 
-    bsdf = nt.nodes.get("Principled BSDF") or nt.nodes.new("ShaderNodeBsdfPrincipled")
-    out  = nt.nodes.get("Material Output") or nt.nodes.new("ShaderNodeOutputMaterial")
+    emission = nt.nodes.new("ShaderNodeEmission")
+    emission.location = (0, 0)
 
-    nt.links.new(bsdf.outputs["BSDF"],          out.inputs["Surface"])
-    nt.links.new(col_node.outputs["Color"],     bsdf.inputs["Base Color"])
-    nt.links.new(col_node.outputs["Color"],     bsdf.inputs["Emission Color"])
+    out = nt.nodes.new("ShaderNodeOutputMaterial")
+    out.location = (250, 0)
+
+    nt.links.new(attr_node.outputs["Color"], emission.inputs["Color"])
+    nt.links.new(emission.outputs["Emission"], out.inputs["Surface"])
 
     mesh.materials.append(mat)
+
+    # --- Geometry Nodes: MeshToPoints + SetMaterial ---
+    # Without this a vertex-only mesh won't render the material at all.
+    _add_point_geo_nodes(obj, mat, point_radius=point_radius)
+
     return obj
+
+
+def _add_point_geo_nodes(obj, mat, point_radius: float = 0.005):
+    import bpy
+
+    geo_mod = obj.modifiers.new(name="GeometryNodes", type='NODES')
+    ng = bpy.data.node_groups.new(name="PointCloudViz", type='GeometryNodeTree')
+    geo_mod.node_group = ng
+
+    ng.interface.new_socket(name="Geometry", in_out="INPUT",  socket_type="NodeSocketGeometry")
+    radius_socket = ng.interface.new_socket(name="Radius",   in_out="INPUT",  socket_type="NodeSocketFloat")
+    radius_socket.default_value = point_radius
+    radius_socket.min_value     = 0.0001
+    ng.interface.new_socket(name="Geometry", in_out="OUTPUT", socket_type="NodeSocketGeometry")
+
+    n_in  = ng.nodes.new('NodeGroupInput')
+    n_out = ng.nodes.new('NodeGroupOutput')
+
+    m2p = ng.nodes.new('GeometryNodeMeshToPoints')
+
+    set_mat = ng.nodes.new('GeometryNodeSetMaterial')
+    set_mat.inputs[2].default_value = mat  # index 2 = Material socket
+
+    ng.links.new(n_in.outputs['Geometry'], m2p.inputs['Mesh'])
+    ng.links.new(n_in.outputs['Radius'],   m2p.inputs['Radius'])
+    ng.links.new(m2p.outputs['Points'],       set_mat.inputs['Geometry'])
+    ng.links.new(set_mat.outputs['Geometry'], n_out.inputs['Geometry'])
+
+    # set the modifier's Radius input to match the import setting
+    for item in ng.interface.items_tree:
+        if item.name == "Radius":
+            geo_mod[item.identifier] = float(point_radius)
+            break

@@ -1,5 +1,7 @@
 import bpy
 import os
+import pty
+import select
 import subprocess
 import tempfile
 
@@ -7,18 +9,49 @@ import tempfile
 _process  = None
 _timer    = None
 _log_file = None  # open file handle for the log
+_pty_fd   = None  # master end of the pseudo-terminal
+
+
+def _drain_output():
+    """Read all currently available bytes from the pty into the log and terminal."""
+    global _pty_fd, _log_file
+    if _pty_fd is None:
+        return
+    while True:
+        ready, _, _ = select.select([_pty_fd], [], [], 0)
+        if not ready:
+            break
+        try:
+            chunk = os.read(_pty_fd, 4096)
+        except OSError:
+            break
+        if not chunk:
+            break
+        text = chunk.decode('utf-8', errors='replace')
+        if _log_file:
+            _log_file.write(text)
+            _log_file.flush()
+        print(text, end='', flush=True)
 
 
 def _poll_process():
     """Timer callback that checks whether the DROID-SLAM subprocess has finished."""
-    global _process, _timer, _log_file
+    global _process, _timer, _log_file, _pty_fd
 
     if _process is None:
         return None  # cancel timer
 
+    _drain_output()
+
     retcode = _process.poll()
     if retcode is None:
         return 1.0  # still running – check again in 1 s
+
+    _drain_output()  # flush any remaining output after process exits
+
+    if _pty_fd is not None:
+        os.close(_pty_fd)
+        _pty_fd = None
 
     if _log_file:
         _log_file.close()
@@ -40,7 +73,7 @@ def _poll_process():
 
         if props.import_pointcloud and props.last_ply_path and os.path.exists(props.last_ply_path):
             from .trajectory import import_pointcloud_ply
-            import_pointcloud_ply(props.last_ply_path, colored=props.colored_pointcloud)
+            import_pointcloud_ply(props.last_ply_path, point_radius=props.point_radius)
     else:
         props.status = f"Error (exit {retcode}) — see log"
 
@@ -55,7 +88,7 @@ class DROIDSLAM_OT_Run(bpy.types.Operator):
     bl_description = "Launch DROID-SLAM in the background and import the result when done"
 
     def execute(self, context):
-        global _process, _timer, _log_file
+        global _process, _timer, _log_file, _pty_fd
         props = context.scene.droid_slam
 
         if _process is not None and _process.poll() is None:
@@ -103,7 +136,7 @@ class DROIDSLAM_OT_Run(bpy.types.Operator):
         conda_sh = os.path.join(conda_base, "etc", "profile.d", "conda.sh")
 
         # Build the demo.py args as a single string for the bash -c call
-        demo_args = " ".join([
+        demo_args_list = [
             f'"{os.path.join(droid_dir, "demo.py")}"',
             "--imagedir",            f'"{input_path}"',
             "--calib",               f'"{calib_path}"',
@@ -112,7 +145,10 @@ class DROIDSLAM_OT_Run(bpy.types.Operator):
             "--buffer",              str(props.buffer),
             "--disable_vis",
             "--reconstruction_path", f'"{recon_path}"',
-        ])
+        ]
+        if props.end_frame >= 0:
+            demo_args_list += ["--t1", str(props.end_frame)]
+        demo_args = " ".join(demo_args_list)
 
         # Use bash -c to source conda and activate the env — exactly what
         # a terminal does. Unset LD_LIBRARY_PATH first so Blender's copy
@@ -128,7 +164,7 @@ class DROIDSLAM_OT_Run(bpy.types.Operator):
             f"TORCH_LIB=$(python -c \"import torch, os; print(os.path.join(os.path.dirname(torch.__file__), 'lib'))\") && "
             f"export LD_LIBRARY_PATH=\"$TORCH_LIB\" && "
             f"python {demo_args} && "
-            f"python \"{view_recon}\" \"{recon_path}\""
+            f"python \"{view_recon}\" \"{recon_path}\" --no_vis"
         )
         cmd = ["bash", "-c", bash_cmd]
 
@@ -142,13 +178,19 @@ class DROIDSLAM_OT_Run(bpy.types.Operator):
         _log_file.write("Command: " + " ".join(cmd) + "\n\n")
         _log_file.flush()
 
+        # Use a pty so the subprocess thinks it's writing to a terminal,
+        # which forces immediate line-by-line flushing from Python and tqdm.
+        master_fd, slave_fd = pty.openpty()
+        _pty_fd = master_fd
+
         _process = subprocess.Popen(
             cmd,
             cwd=droid_dir,
-            stdout=_log_file,
-            stderr=subprocess.STDOUT,
+            stdout=slave_fd,
+            stderr=slave_fd,
             env=env,
         )
+        os.close(slave_fd)  # parent doesn't need the slave end
 
         props.status = "Running…"
         _timer = bpy.app.timers.register(_poll_process, first_interval=2.0)
@@ -163,10 +205,13 @@ class DROIDSLAM_OT_Cancel(bpy.types.Operator):
     bl_description = "Kill the running DROID-SLAM process"
 
     def execute(self, context):
-        global _process, _log_file
+        global _process, _log_file, _pty_fd
         if _process is not None and _process.poll() is None:
             _process.terminate()
             context.scene.droid_slam.status = "Cancelled"
+        if _pty_fd is not None:
+            os.close(_pty_fd)
+            _pty_fd = None
         if _log_file:
             _log_file.close()
             _log_file = None
@@ -246,7 +291,7 @@ class DROIDSLAM_OT_ImportPointCloud(bpy.types.Operator):
 
     def execute(self, context):
         from .trajectory import import_pointcloud_ply
-        import_pointcloud_ply(self.filepath, colored=context.scene.droid_slam.colored_pointcloud)
+        import_pointcloud_ply(self.filepath, point_radius=context.scene.droid_slam.point_radius)
         return {'FINISHED'}
 
 

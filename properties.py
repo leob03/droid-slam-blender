@@ -65,15 +65,24 @@ class DroidSlamProperties(bpy.types.PropertyGroup):
         description="Blender frame that corresponds to frame 0 of the trajectory",
         default=1,
     )
+    end_frame: IntProperty(
+        name="End Frame",
+        description="Last Blender frame to import (-1 = all frames)",
+        default=-1,
+        min=-1,
+    )
     import_pointcloud: BoolProperty(
         name="Import Point Cloud",
         description="Also import the reconstructed point cloud as a mesh",
         default=True,
     )
-    colored_pointcloud: BoolProperty(
-        name="Colored Point Cloud",
-        description="Apply vertex colors from the PLY using an Emission shader (slower import)",
-        default=False,
+    point_radius: FloatProperty(
+        name="Point Radius",
+        description="Display radius of each point in the Blender viewport (world units)",
+        default=0.005,
+        min=0.0001,
+        soft_max=0.1,
+        precision=4,
     )
 
     # --- runtime state ---
