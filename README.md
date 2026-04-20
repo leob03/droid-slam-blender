@@ -2,6 +2,8 @@
 
 A Blender add-on that runs [DROID-SLAM](https://github.com/princeton-vl/DROID-SLAM) camera tracking directly from Blender and imports the resulting trajectory and point cloud into the scene.
 
+<video src="assets/demo_DROID-SLAM_blender.mp4" controls width="100%"></video>
+
 ## Installation
 
 1. Zip the `droid_slam_blender/` folder
